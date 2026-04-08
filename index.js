@@ -58,7 +58,7 @@ client.once(Events.ClientReady, async () => {
   console.log(`📋 Guild ID: ${process.env.GUILD_ID}`);
   console.log(`🎧 Trigger VC ID: ${process.env.CREATE_VC_ID}`);
   console.log(`📢 Reaction Channel: ${process.env.REACTION_CHANNEL_NAME || "verify"}`);
-  console.log(`🎟️  Ticket Channel: ${process.env.TICKET_CHANNEL_ID || "1490115817394798795"}`);
+  console.log(`🎟️  Ticket Channel: ${process.env.TICKET_CHANNEL_ID}`);
   console.log("================================\n");
   
   await ensureReactionPanel(client, { cfg, findChannel });
