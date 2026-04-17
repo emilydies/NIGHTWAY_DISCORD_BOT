@@ -3,6 +3,10 @@ const {
   GatewayIntentBits,
   Partials,
   Events,
+  EmbedBuilder,
+  ActionRowBuilder,
+  ButtonBuilder,
+  ButtonStyle,
 } = require("discord.js");
 
 // Import configurations
@@ -42,10 +46,9 @@ const client = new Client({
     GatewayIntentBits.GuildMembers,
     GatewayIntentBits.GuildVoiceStates,
     GatewayIntentBits.GuildMessages,
-    GatewayIntentBits.GuildMessageReactions,
     GatewayIntentBits.MessageContent,
   ],
-  partials: [Partials.Message, Partials.Channel, Partials.Reaction],
+  partials: [Partials.Message, Partials.Channel, Partials.User],
 });
 
 // Load database
@@ -54,55 +57,130 @@ let vcOwners = loadDb();
 
 // Ready event
 client.once(Events.ClientReady, async () => {
+  const config = cfg();
+
   console.log(`\n✅ Bot logged in as ${client.user.tag}`);
   console.log(`📋 Guild ID: ${process.env.GUILD_ID}`);
   console.log(`🎧 Trigger VC ID: ${process.env.CREATE_VC_ID}`);
   console.log(`📢 Reaction Channel: ${process.env.REACTION_CHANNEL_NAME || "verify"}`);
-  console.log(`🎟️  Ticket Channel: ${process.env.TICKET_CHANNEL_ID}`);
+  console.log(`🎟️  Ticket Channel (EN): ${config.ticketChannelId || "not set"}`);
+  console.log(`🎟️  Ticket Channel (RU): ${config.ticketRuChannelId || "not set"}`);
   console.log("================================\n");
   
   await ensureReactionPanel(client, { cfg, findChannel });
-  await ensureTicketPanel(client, { findChannel });
+  await ensureTicketPanels(client, { cfg });
 });
 
-// Function to ensure ticket message exists
-async function ensureTicketPanel(client, { findChannel }) {
+function getTicketPanelContent(locale) {
+  if (locale === "ru") {
+    return {
+      title: "📋 Система тикетов поддержки",
+      description: [
+        "Используйте систему тикетов, чтобы:",
+        "",
+        "- Задать вопросы по платформе",
+        "- Сообщить о проблемах",
+        "- Пожаловаться на игроков",
+        "- Запросить доступ к матчмейкингу",
+        "",
+        "*Ваш запрос будет рассмотрен как можно скорее.*",
+      ].join("\n"),
+      buttonLabel: "Создать тикет",
+    };
+  }
+
+  return {
+    title: "📋 Support Ticket System",
+    description: [
+      "Use the ticket system to:",
+      "",
+      "- Ask questions about the platform",
+      "- Report issues",
+      "- Report players",
+      "- Request access to matchmaking",
+      "",
+      "*Your request will be reviewed as soon as possible.*",
+    ].join("\n"),
+    buttonLabel: "Create Ticket",
+  };
+}
+
+async function ensureSingleTicketPanel(client, guild, channelId, locale) {
+  if (!channelId) return;
+
+  const channel = await guild.channels.fetch(channelId).catch(() => null);
+  if (!channel) {
+    console.warn(`⚠️  Ticket channel (${locale.toUpperCase()}) not found: ${channelId}`);
+    return;
+  }
+
+  const panel = getTicketPanelContent(locale);
+  const ticketButtonRow = new ActionRowBuilder().addComponents(
+    new ButtonBuilder()
+      .setCustomId("ticket_create")
+      .setLabel(panel.buttonLabel)
+      .setEmoji("🎟️")
+      .setStyle(ButtonStyle.Primary),
+  );
+
+  const ticketEmbed = new EmbedBuilder()
+    .setColor(0x5865F2)
+    .setTitle(panel.title)
+    .setDescription(panel.description);
+
+  const messages = await channel.messages.fetch({ limit: 20 }).catch(() => null);
+  const ticketMessage = messages?.find(
+    (msg) =>
+      msg.author.id === client.user.id &&
+      (msg.components?.some((row) => row.components?.some((component) => component.customId === "ticket_create")) ||
+        msg.embeds?.some((e) => {
+          const title = (e.title || "").toLowerCase();
+          return title.includes("ticket") || title.includes("тикет");
+        })),
+  );
+
+  if (!ticketMessage) {
+    await channel.send({
+      embeds: [ticketEmbed],
+      components: [ticketButtonRow],
+    });
+    console.log(`   ✅ Ticket message created in #${channel.name} (${locale.toUpperCase()})`);
+    return;
+  }
+
+  const existingTitle = ticketMessage.embeds?.[0]?.title || "";
+  const hasCreateButton = ticketMessage.components?.some((row) =>
+    row.components?.some((component) => component.customId === "ticket_create"),
+  );
+
+  if (!hasCreateButton || existingTitle !== panel.title) {
+    await ticketMessage
+      .edit({
+        embeds: [ticketEmbed],
+        components: [ticketButtonRow],
+        content: "",
+      })
+      .catch(() => {});
+    console.log(`   ✅ Ticket message updated in #${channel.name} (${locale.toUpperCase()})`);
+  } else {
+    console.log(`   ✅ Ticket message already exists in #${channel.name} (${locale.toUpperCase()})`);
+  }
+}
+
+// Function to ensure ticket messages exist in EN and RU channels
+async function ensureTicketPanels(client, { cfg }) {
   try {
-    const ticketChannelId = process.env.TICKET_CHANNEL_ID || "1490115817394798795";
-    const channel = await findChannel(client, ticketChannelId);
-    if (!channel) {
-      console.warn(`⚠️  Ticket channel not found: ${ticketChannelId}`);
+    const config = cfg();
+    const guild = await client.guilds.fetch(config.guildId).catch(() => null);
+    if (!guild) {
+      console.warn(`⚠️  Guild not found: ${config.guildId}`);
       return;
     }
 
-    // Check if ticket message already exists
-    const messages = await channel.messages.fetch({ limit: 10 }).catch(() => null);
-    const ticketMessage = messages?.find(
-      (msg) => msg.author.id === client.user.id && msg.content.includes("ticket system")
-    );
-
-    if (!ticketMessage) {
-      const msg = await channel.send(
-        [
-          "Use the ticket system to:",
-          "",
-          "• Ask questions about the platform",
-          "• Report issues",
-          "• Report players",
-          "• Request an account recovery",
-          "",
-          "Your request will be reviewed as soon as possible.",
-          "",
-          "Press 🎟️ to create a ticket.",
-        ].join("\n")
-      );
-      await msg.react("🎟️").catch(() => {});
-      console.log("   ✅ Ticket message created in #" + channel.name);
-    } else {
-      console.log("   ✅ Ticket message already exists");
-    }
+    await ensureSingleTicketPanel(client, guild, config.ticketChannelId, "en");
+    await ensureSingleTicketPanel(client, guild, config.ticketRuChannelId, "ru");
   } catch (err) {
-    console.error("   ❌ Error ensuring ticket panel:", err.message);
+    console.error("   ❌ Error ensuring ticket panels:", err.message);
   }
 }
 

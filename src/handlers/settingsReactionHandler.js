@@ -1,202 +1,219 @@
-const { Events, PermissionsBitField } = require("discord.js");
+const {
+  Events,
+  PermissionsBitField,
+  ActionRowBuilder,
+  ButtonBuilder,
+  ButtonStyle,
+  ModalBuilder,
+  TextInputBuilder,
+  TextInputStyle,
+} = require("discord.js");
 
 module.exports = (client, { SETTINGS_CACHE, cfg, getUserLanguage, getI18n }) => {
-  client.on(Events.MessageReactionAdd, async (reaction, user) => {
-    if (user.bot) return;
+  const LIMIT_MODAL_PREFIX = "settings_limit_modal:";
+  const KICK_BUTTON_PREFIX = "settings_kick_user:";
 
-    try {
-      if (reaction.partial) await reaction.fetch();
-      if (reaction.message.partial) await reaction.message.fetch();
-    } catch {
+  client.on(Events.InteractionCreate, async (interaction) => {
+    if (!interaction.guild) return;
+
+    if (interaction.isButton() && interaction.customId.startsWith(KICK_BUTTON_PREFIX)) {
+      const [, settingsMessageId, targetUserId] = interaction.customId.split(":");
+      const settingsInfo = SETTINGS_CACHE.get(settingsMessageId);
+      if (!settingsInfo) {
+        await interaction.reply({ content: "❌ Settings session has expired.", ephemeral: true }).catch(() => {});
+        return;
+      }
+
+      if (interaction.user.id !== settingsInfo.ownerId) {
+        await interaction.reply({ content: "❌ Only the room owner can use this button.", ephemeral: true }).catch(() => {});
+        return;
+      }
+
+      const guild = interaction.guild;
+      const voiceChannel = guild.channels.cache.get(settingsInfo.vcId);
+      const textChannel = guild.channels.cache.get(settingsInfo.textChannelId);
+      const lang = settingsInfo?.lang || (await getUserLanguage(guild, settingsInfo.ownerId, { cfg }));
+
+      await interaction.deferUpdate().catch(() => {});
+
+      if (!voiceChannel || !textChannel) {
+        await interaction.followUp({ content: "❌ Room channels not found.", ephemeral: true }).catch(() => {});
+        return;
+      }
+
+      const targetMember = await guild.members.fetch(targetUserId).catch(() => null);
+      if (!targetMember || targetMember.voice.channelId !== voiceChannel.id) {
+        await interaction.followUp({ content: "❌ User is no longer in your room.", ephemeral: true }).catch(() => {});
+        await interaction.message.delete().catch(() => {});
+        return;
+      }
+
+      await targetMember.voice.disconnect("Kicked by room owner").catch(() => {});
+      await interaction.message.delete().catch(() => {});
+
+      const message = getI18n(lang, "kickSuccess").replace("{user}", targetMember.user.username);
+      await textChannel.send(message).catch(() => {});
       return;
     }
 
-    const settingsInfo = SETTINGS_CACHE.get(reaction.message.id);
-    if (!settingsInfo) return;
+    if (interaction.isButton() && ["settings_lock", "settings_limit", "settings_kick"].includes(interaction.customId)) {
+      const settingsInfo = SETTINGS_CACHE.get(interaction.message.id);
+      if (!settingsInfo) return;
 
-    const { vcId, ownerId, textChannelId } = settingsInfo;
-    if (user.id !== ownerId) {
-      console.log(`⚙️  [SETTINGS] Non-owner tried to use reaction: ${user.username}`);
-      await reaction.users.remove(user.id).catch(() => {});
-      return;
-    }
+      const { vcId, ownerId, textChannelId } = settingsInfo;
+      if (interaction.user.id !== ownerId) {
+        console.log(`⚙️  [SETTINGS] Non-owner tried to use buttons: ${interaction.user.username}`);
+        await interaction.reply({ content: "❌ Only the room owner can use these controls.", ephemeral: true }).catch(() => {});
+        return;
+      }
 
-    const guild = reaction.message.guild;
-    const voiceChannel = guild.channels.cache.get(vcId);
-    const textChannel = guild.channels.cache.get(textChannelId);
-    const member = await guild.members.fetch(user.id).catch(() => null);
+      const guild = interaction.guild;
+      const voiceChannel = guild.channels.cache.get(vcId);
+      const textChannel = guild.channels.cache.get(textChannelId);
+      const member = await guild.members.fetch(interaction.user.id).catch(() => null);
 
-    if (!voiceChannel || !member || !textChannel) {
-      console.log(`⚙️  [SETTINGS] ❌ VC or member or text channel not found`);
-      return;
-    }
+      if (!voiceChannel || !member || !textChannel) {
+        console.log("⚙️  [SETTINGS] ❌ VC or member or text channel not found");
+        await interaction.reply({ content: "❌ Room not found.", ephemeral: true }).catch(() => {});
+        return;
+      }
 
-    console.log(`⚙️  [SETTINGS] Owner ${user.username} reacted with: ${reaction.emoji.name}`);
-    await reaction.users.remove(user.id).catch(() => {});
+      const lang = settingsInfo?.lang || (await getUserLanguage(guild, ownerId, { cfg }));
 
-    if (reaction.emoji.name === "🔒") {
-      try {
-        const lang = settingsInfo?.lang || (await getUserLanguage(guild, ownerId, { cfg }));
-        const everyoneOverwrite = voiceChannel.permissionOverwrites.cache.find(
-          (ow) => ow.id === guild.roles.everyone.id
-        );
-        
-        const isLocked = !everyoneOverwrite?.allow.has(PermissionsBitField.Flags.Connect);
+      if (interaction.customId === "settings_lock") {
+        try {
+          const everyoneOverwrite = voiceChannel.permissionOverwrites.cache.find(
+            (ow) => ow.id === guild.roles.everyone.id,
+          );
 
-        if (isLocked) {
-          console.log(`   🔓 Unlocking VC...`);
-          await voiceChannel.permissionOverwrites
-            .edit(guild.roles.everyone, { Connect: true, ViewChannel: true })
-            .catch(() => {});
-          await textChannel.send(getI18n(lang, "lockUnlocked")).catch(() => {});
-        } else {
-          console.log(`   🔒 Locking VC...`);
-          
-          await voiceChannel.permissionOverwrites
-            .edit(guild.roles.everyone, { Connect: false })
-            .catch(() => {});
-          
-          for (const voiceMember of voiceChannel.members.values()) {
+          const isLocked = !everyoneOverwrite?.allow.has(PermissionsBitField.Flags.Connect);
+
+          if (isLocked) {
+            console.log("   🔓 Unlocking VC...");
             await voiceChannel.permissionOverwrites
-              .edit(voiceMember.id, { ViewChannel: true, Connect: true })
+              .edit(guild.roles.everyone, { Connect: true, ViewChannel: true })
               .catch(() => {});
-          }
-          
-          await textChannel.send(getI18n(lang, "lockLocked")).catch(() => {});
-        }
-      } catch (err) {
-        console.error(`   ❌ Lock error: ${err.message}`);
-      }
-    }
+            await textChannel.send(getI18n(lang, "lockUnlocked")).catch(() => {});
+            await interaction.reply({ content: "✅ Room unlocked.", ephemeral: true }).catch(() => {});
+          } else {
+            console.log("   🔒 Locking VC...");
 
-    if (reaction.emoji.name === "👥") {
-      try {
-        const lang = settingsInfo?.lang || (await getUserLanguage(guild, ownerId, { cfg }));
-        console.log(`   👥 Requesting user limit from owner...`);
-        const promptMsg = await textChannel
-          .send(getI18n(lang, "limitPrompt"))
-          .catch(() => null);
+            await voiceChannel.permissionOverwrites
+              .edit(guild.roles.everyone, { Connect: false })
+              .catch(() => {});
 
-        if (!promptMsg) {
-          console.log(`   ❌ Failed to send prompt message`);
-          return;
-        }
-
-        const filter = (m) => m.author.id === ownerId && !isNaN(parseInt(m.content));
-        const collector = textChannel.createMessageCollector({ filter, time: 60000, max: 1 });
-
-        collector.on("collect", async (msg) => {
-          try {
-            const limit = parseInt(msg.content);
-            
-            if (!Number.isInteger(limit) || limit < 0 || limit > 99) {
-              console.log(`   👥 Invalid limit: ${msg.content}`);
-              await msg.delete().catch(() => {});
-              await textChannel.send(getI18n(lang, "limitInvalid")).catch(() => {});
-              await promptMsg.delete().catch(() => {});
-              return;
+            for (const voiceMember of voiceChannel.members.values()) {
+              await voiceChannel.permissionOverwrites
+                .edit(voiceMember.id, { ViewChannel: true, Connect: true })
+                .catch(() => {});
             }
 
-            console.log(`   👥 Setting user limit to: ${limit === 0 ? "unlimited" : limit}`);
-            await voiceChannel.setUserLimit(limit).catch(() => {});
-            
-            await msg.delete().catch(() => {});
-            await promptMsg.delete().catch(() => {});
-            
-            const limitText = limit === 0 ? getI18n(lang, "limitUnlimited") : limit;
-            const message = getI18n(lang, "limitSuccess").replace("{limit}", limitText);
-            await textChannel.send(message).catch(() => {});
-          } catch (err) {
-            console.error(`   ❌ Collect error: ${err.message}`);
+            await textChannel.send(getI18n(lang, "lockLocked")).catch(() => {});
+            await interaction.reply({ content: "✅ Room locked.", ephemeral: true }).catch(() => {});
           }
-        });
-
-        collector.on("end", async (collected) => {
-          try {
-            if (collected.size === 0) {
-              console.log(`   👥 No response from owner (timeout)`);
-              await promptMsg.delete().catch(() => {});
-            }
-          } catch (err) {
-            console.error(`   ❌ End error: ${err.message}`);
-          }
-        });
-
-        collector.on("error", (err) => {
-          console.error(`   ❌ Collector error: ${err.message}`);
-        });
-      } catch (err) {
-        console.error(`   ❌ User limit error: ${err.message}`);
+        } catch (err) {
+          console.error(`   ❌ Lock error: ${err.message}`);
+          await interaction.reply({ content: "❌ Failed to update lock state.", ephemeral: true }).catch(() => {});
+        }
+        return;
       }
-    }
 
-    if (reaction.emoji.name === "⛔") {
-      try {
-        const lang = settingsInfo?.lang || (await getUserLanguage(guild, ownerId, { cfg }));
+      if (interaction.customId === "settings_limit") {
+        const modal = new ModalBuilder()
+          .setCustomId(`${LIMIT_MODAL_PREFIX}${interaction.message.id}`)
+          .setTitle("Set User Limit");
+
+        const limitInput = new TextInputBuilder()
+          .setCustomId("limit_value")
+          .setLabel("Enter limit (0-99)")
+          .setPlaceholder("0")
+          .setRequired(true)
+          .setStyle(TextInputStyle.Short)
+          .setMaxLength(2);
+
+        modal.addComponents(new ActionRowBuilder().addComponents(limitInput));
+        await interaction.showModal(modal).catch(() => {});
+        return;
+      }
+
+      if (interaction.customId === "settings_kick") {
         const members = voiceChannel.members.filter((m) => m.id !== ownerId);
-        
+
         if (members.size === 0) {
-          console.log(`   ⛔ No one to kick`);
+          console.log("   ⛔ No one to kick");
           await textChannel.send(getI18n(lang, "noOneToKick")).catch(() => {});
+          await interaction.reply({ content: "ℹ️ No users available to kick.", ephemeral: true }).catch(() => {});
           return;
         }
 
         console.log(`   ⛔ Showing kick list with ${members.size} member(s)...`);
-        
-        const memberList = members
-          .map((m, i) => `${i === 0 ? "1️⃣" : i === 1 ? "2️⃣" : i === 2 ? "3️⃣" : i === 3 ? "4️⃣" : i === 4 ? "5️⃣" : "❌"} **${m.user.username}**`)
-          .join("\n");
 
-        const kickMsg = await textChannel
-          .send(`${getI18n(lang, "selectKick")}\n${memberList}`)
-          .catch(() => null);
+        const memberArray = Array.from(members.values()).slice(0, 25);
+        const rows = [];
 
-        if (!kickMsg) return;
-
-        const emojis = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣"];
-        const maxEmojis = Math.min(members.size, emojis.length);
-        
-        for (let i = 0; i < maxEmojis; i++) {
-          await kickMsg.react(emojis[i]).catch(() => {});
+        for (let i = 0; i < memberArray.length; i += 5) {
+          const chunk = memberArray.slice(i, i + 5);
+          const row = new ActionRowBuilder().addComponents(
+            ...chunk.map((m) =>
+              new ButtonBuilder()
+                .setCustomId(`${KICK_BUTTON_PREFIX}${interaction.message.id}:${m.id}`)
+                .setLabel(m.user.username.slice(0, 80))
+                .setStyle(ButtonStyle.Danger),
+            ),
+          );
+          rows.push(row);
         }
 
-        const emojiFilter = (reaction, kickUser) =>
-          kickUser.id === ownerId && emojis.indexOf(reaction.emoji.name) < maxEmojis;
+        await textChannel
+          .send({
+            content: getI18n(lang, "selectKick"),
+            components: rows,
+          })
+          .catch(() => null);
 
-        const kickCollector = kickMsg.createReactionCollector({ filter: emojiFilter, time: 30000, max: 1 });
-
-        kickCollector.on("collect", async (reaction) => {
-          try {
-            const selectedIdx = emojis.indexOf(reaction.emoji.name);
-            const memberArray = Array.from(members.values());
-            const toKick = memberArray[selectedIdx];
-
-            if (toKick) {
-              console.log(`   ⛔ Kicking: ${toKick.user.username}`);
-              await toKick.voice.disconnect("Kicked by room owner").catch(() => {});
-              await kickMsg.delete().catch(() => {});
-              const message = getI18n(lang, "kickSuccess").replace("{user}", toKick.user.username);
-              await textChannel.send(message).catch(() => {});
-            }
-          } catch (err) {
-            console.error(`   ❌ Kick error: ${err.message}`);
-          }
-        });
-
-        kickCollector.on("end", async () => {
-          try {
-            await kickMsg.delete().catch(() => {});
-          } catch (err) {
-            console.error(`   ❌ Error cleaning up kick message: ${err.message}`);
-          }
-        });
-
-        kickCollector.on("error", (err) => {
-          console.error(`   ❌ Kick collector error: ${err.message}`);
-        });
-      } catch (err) {
-        console.error(`   ❌ Kick system error: ${err.message}`);
+        await interaction.reply({ content: "✅ Kick panel sent.", ephemeral: true }).catch(() => {});
       }
+      return;
+    }
+
+    if (interaction.isModalSubmit() && interaction.customId.startsWith(LIMIT_MODAL_PREFIX)) {
+      const settingsMessageId = interaction.customId.slice(LIMIT_MODAL_PREFIX.length);
+      const settingsInfo = SETTINGS_CACHE.get(settingsMessageId);
+      if (!settingsInfo) {
+        await interaction.reply({ content: "❌ Settings session has expired.", ephemeral: true }).catch(() => {});
+        return;
+      }
+
+      if (interaction.user.id !== settingsInfo.ownerId) {
+        await interaction.reply({ content: "❌ Only the room owner can do this.", ephemeral: true }).catch(() => {});
+        return;
+      }
+
+      const guild = interaction.guild;
+      const voiceChannel = guild.channels.cache.get(settingsInfo.vcId);
+      const textChannel = guild.channels.cache.get(settingsInfo.textChannelId);
+      const lang = settingsInfo?.lang || (await getUserLanguage(guild, settingsInfo.ownerId, { cfg }));
+
+      if (!voiceChannel || !textChannel) {
+        await interaction.reply({ content: "❌ Room not found.", ephemeral: true }).catch(() => {});
+        return;
+      }
+
+      const input = interaction.fields.getTextInputValue("limit_value").trim();
+      const limit = Number.parseInt(input, 10);
+
+      if (!Number.isInteger(limit) || limit < 0 || limit > 99) {
+        await interaction.reply({ content: getI18n(lang, "limitInvalid"), ephemeral: true }).catch(() => {});
+        return;
+      }
+
+      await voiceChannel.setUserLimit(limit).catch(() => {});
+
+      const limitText = limit === 0 ? getI18n(lang, "limitUnlimited") : String(limit);
+      const message = getI18n(lang, "limitSuccess").replace("{limit}", limitText);
+
+      await textChannel.send(message).catch(() => {});
+      await interaction.reply({ content: `✅ Limit updated to ${limitText}.`, ephemeral: true }).catch(() => {});
     }
   });
 };

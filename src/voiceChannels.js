@@ -7,6 +7,8 @@ const {
 const { getUserLanguage, getI18n } = require("./i18n");
 const { createSettingsMessage } = require("./settingsPanel");
 
+const POST_INIT_CLEANUP_DELAY_MS = 10000;
+
 async function cleanupOwnedChannel(channel, { cfg, vcOwners, saveDb }) {
   if (!channel) return;
   if (channel.type !== ChannelType.GuildVoice) return;
@@ -178,7 +180,33 @@ async function createPrivateVoice(member, { cfg, vcOwners, saveDb, getOwnedChann
   saveDb(vcOwners);
   console.log(`   💾 Data saved to DB`);
 
-  await member.voice.setChannel(channel).catch(() => {});
+  const moved = await member.voice.setChannel(channel).then(() => true).catch((err) => {
+    console.error(`   ❌ Failed to move user into new VC: ${err.message}`);
+    return false;
+  });
+
+  console.log(`   ⏳ Waiting 10s before post-init cleanup check...`);
+  await new Promise((resolve) => setTimeout(resolve, POST_INIT_CLEANUP_DELAY_MS));
+
+  const refreshedChannel = await guild.channels.fetch(channel.id).catch(() => null);
+  const refreshedMember = await guild.members.fetch(member.id).catch(() => null);
+  const isMemberInCreatedChannel = refreshedMember?.voice?.channelId === channel.id;
+  const isCreatedChannelEmpty = !refreshedChannel || refreshedChannel.members.size === 0;
+
+  if (!moved || (!isMemberInCreatedChannel && isCreatedChannelEmpty)) {
+    console.log(`   ⚠️  New VC is empty after initialization, running cleanup...`);
+
+    if (refreshedChannel) {
+      await cleanupOwnedChannel(refreshedChannel, { cfg, vcOwners, saveDb });
+    } else {
+      // Fallback if channel was removed externally before cleanup call.
+      delete vcOwners[channel.id];
+      saveDb(vcOwners);
+    }
+
+    return null;
+  }
+
   console.log(`   ✅ User moved to new VC\n`);
   return channel;
 }

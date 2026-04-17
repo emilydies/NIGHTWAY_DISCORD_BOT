@@ -1,68 +1,168 @@
 const { Events } = require("discord.js");
 
 module.exports = (client, { cfg, findRole }) => {
-  client.on(Events.MessageReactionAdd, async (reaction, user) => {
+  console.log("🔧 [ROLES] Region button handler initialized");
+
+  const isRegionPanelMessage = (message) => {
+    const content = (message.content || "").toLowerCase();
+    const byContent =
+      content.includes("to gain access") ||
+      content.includes("select your region");
+
+    const byEmbed = message.embeds?.some((embed) => {
+      const title = (embed.title || "").toLowerCase();
+      const desc = (embed.description || "").toLowerCase();
+      return (
+        title.includes("select your region") ||
+        title.includes("select your language") ||
+        title.includes("select your language & region") ||
+        desc.includes("please select your region") ||
+        desc.includes("please select your language")
+      );
+    });
+
+    return Boolean(byContent || byEmbed);
+  };
+
+  const getRoleById = async (guild, roleId) => {
+    if (!roleId) return null;
+    return guild.roles.cache.get(roleId) || (await guild.roles.fetch(roleId).catch(() => null));
+  };
+
+  const codeByCustomId = {
+    region_ru: "RU",
+    region_eu: "EU",
+    region_na: "NA",
+    region_sa: "SA",
+    region_oce: "OCE",
+  };
+
+  client.on(Events.InteractionCreate, async (interaction) => {
+    if (!interaction.isButton()) return;
+    if (!codeByCustomId[interaction.customId]) return;
+
+    const message = interaction.message;
+    if (!message?.guild) return;
+
+    const user = interaction.user;
     if (user.bot) return;
 
-    try {
-      if (reaction.partial) await reaction.fetch();
-      if (reaction.message.partial) await reaction.message.fetch();
-    } catch {
+    const config = cfg();
+
+    if (config.reactionChannelId && interaction.channelId !== config.reactionChannelId) {
       return;
     }
 
-    const message = reaction.message;
-    if (!message.guild) return;
-    if (message.author.id !== client.user.id) return;
-    if (!message.content.includes("To gain access")) return;
+    if (message.author.id !== client.user.id) {
+      console.log("⚠️ [ROLES] Ignored reaction: message is not authored by bot");
+      return;
+    }
+    if (!isRegionPanelMessage(message)) {
+      console.log("⚠️ [ROLES] Ignored button: message does not match region panel signature");
+      return;
+    }
+
+    await interaction.deferReply({ ephemeral: true }).catch(() => {});
 
     const guild = message.guild;
     const member = await guild.members.fetch(user.id).catch(() => null);
-    if (!member) return;
-
-    const config = cfg();
-    
-    // Try to get roles by ID first (more reliable)
-    let ruRole = config.roleRuId 
-      ? guild.roles.cache.get(config.roleRuId)
-      : await findRole(guild, config.roleRuName);
-    
-    let engRole = config.roleEngId
-      ? guild.roles.cache.get(config.roleEngId)
-      : await findRole(guild, config.roleEngName);
-    
-    const additionalRole = guild.roles.cache.get("1329007888332754944");
-
-    if (!ruRole || !engRole) {
-      console.log(`👤 [ROLES] ❌ Role not found - RU: ${ruRole?.id || "NOT FOUND"} (${ruRole?.name || "N/A"}), ENG: ${engRole?.id || "NOT FOUND"} (${engRole?.name || "N/A"})`);
-      console.log(`   Config: roleRuId=${config.roleRuId}, roleEngId=${config.roleEngId}`);
+    if (!member) {
+      console.log(`⚠️ [ROLES] Failed to fetch member for user ${user.id}`);
       return;
     }
 
-    if (reaction.emoji.name === "🇷🇺") {
-      console.log(`👤 [ROLES] ${member.user.username} selected RU`);
-      await member.roles.add(ruRole).catch(() => {});
-      await member.roles.remove(engRole).catch(() => {});
-      if (additionalRole) {
-        await member.roles.add(additionalRole).catch(() => {});
-        console.log(`   ✅ Added roles: ${ruRole.name}, ${additionalRole.name}`);
+    const me = guild.members.me || (await guild.members.fetchMe().catch(() => null));
+    if (!me) {
+      console.log("❌ [ROLES] Failed to fetch bot member object");
+      return;
+    }
+    if (!me.permissions.has("ManageRoles")) {
+      console.log("❌ [ROLES] Missing permission: Manage Roles");
+      return;
+    }
+
+    const ruRole = await getRoleById(guild, config.roleRuId);
+    const euRole = await getRoleById(guild, config.roleEngId);
+
+    const naRole = await getRoleById(
+      guild,
+      config.roleNaId,
+    );
+    const saRole = await getRoleById(
+      guild,
+      config.roleSaId,
+    );
+    const oceRole = await getRoleById(
+      guild,
+      config.roleOceId,
+    );
+
+    const additionalRole = await getRoleById(guild, config.verifiedRoleId);
+
+    if (!ruRole || !euRole || !naRole || !saRole || !oceRole) {
+      console.log(
+        `👤 [ROLES] ❌ Role missing - RU: ${ruRole?.id || "NOT FOUND"}, EU: ${euRole?.id || "NOT FOUND"}, NA: ${naRole?.id || "NOT FOUND"}, SA: ${saRole?.id || "NOT FOUND"}, OCE: ${oceRole?.id || "NOT FOUND"}`,
+      );
+      console.log(
+        `   Config: roleRuId=${config.roleRuId}, roleEngId=${config.roleEngId}, roleNaId=${config.roleNaId}, roleSaId=${config.roleSaId}, roleOceId=${config.roleOceId}`,
+      );
+      await interaction.editReply({ content: "❌ Region roles are not configured correctly." }).catch(() => {});
+      return;
+    }
+
+    const regionByCode = {
+      RU: { code: "RU", role: ruRole },
+      EU: { code: "EU", role: euRole },
+      NA: { code: "NA", role: naRole },
+      SA: { code: "SA", role: saRole },
+      OCE: { code: "OCE", role: oceRole },
+    };
+
+    const selected = regionByCode[codeByCustomId[interaction.customId]];
+    if (!selected) {
+      console.log(`⚠️ [ROLES] Ignored unsupported button: ${interaction.customId}`);
+      await interaction.editReply({ content: "⚠️ Unsupported region selection." }).catch(() => {});
+      return;
+    }
+
+    if (selected.role.position >= me.roles.highest.position) {
+      console.log(
+        `❌ [ROLES] Cannot manage role ${selected.role.name}: move bot role above it`,
+      );
+      await interaction.editReply({ content: "❌ I cannot manage that role. Move the bot role higher." }).catch(() => {});
+      return;
+    }
+
+    console.log(`👤 [ROLES] ${member.user.username} selected ${selected.code}`);
+
+    const allRegionRoles = [ruRole, euRole, naRole, saRole, oceRole];
+    for (const role of allRegionRoles) {
+      if (role.position >= me.roles.highest.position) continue;
+      if (role.id === selected.role.id) {
+        await member.roles.add(role).catch((err) => {
+          console.log(`❌ [ROLES] Failed to add ${role.name}: ${err.message}`);
+        });
       } else {
-        console.log(`   ✅ Added role: ${ruRole.name}`);
+        await member.roles.remove(role).catch((err) => {
+          console.log(`❌ [ROLES] Failed to remove ${role.name}: ${err.message}`);
+        });
       }
-    } else if (reaction.emoji.name === "🇪🇺") {
-      console.log(`👤 [ROLES] ${member.user.username} selected ENG`);
-      await member.roles.add(engRole).catch(() => {});
-      await member.roles.remove(ruRole).catch(() => {});
-      if (additionalRole) {
-        await member.roles.add(additionalRole).catch(() => {});
-        console.log(`   ✅ Added roles: ${engRole.name}, ${additionalRole.name}`);
+    }
+
+    if (additionalRole) {
+      if (additionalRole.position < me.roles.highest.position) {
+        await member.roles.add(additionalRole).catch((err) => {
+          console.log(`❌ [ROLES] Failed to add ${additionalRole.name}: ${err.message}`);
+        });
+        console.log(`   ✅ Applied roles: ${selected.role.name}, ${additionalRole.name}`);
       } else {
-        console.log(`   ✅ Added role: ${engRole.name}`);
+        console.log(`⚠️ [ROLES] Skipped additional role ${additionalRole.name}: bot role is lower`);
+        console.log(`   ✅ Applied role: ${selected.role.name}`);
       }
     } else {
-      return;
+      console.log(`   ✅ Applied role: ${selected.role.name}`);
     }
 
-    await reaction.users.remove(user.id).catch(() => {});
+    await interaction.editReply({ content: `✅ Region selected: ${selected.code}` }).catch(() => {});
   });
 };
