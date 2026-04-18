@@ -6,3 +6,5 @@
 .DS_Store
 *.log
 vcOwners.json
+secrets.json
+BOT_VPS_RUNBOOK.md
